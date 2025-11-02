@@ -193,53 +193,64 @@ public class CarController : MonoBehaviour
         currentGear = Mathf.Clamp(Mathf.RoundToInt(currentGearFloat), 0, gearSpeeds.Length - 1);
     }
 
-    void ApplyDrive(float accel)
+void ApplyDrive(float accel)
+{
+    float speed = rb.linearVelocity.magnitude;
+    float thrustTorque;
+
+    // --- Csak pozitív gáz ad hajtást ---
+    float driveInput = Mathf.Max(accel, 0f);
+
+    // --- Hajtás ---
+    switch (_carDriveType)
     {
-        float speed = rb.linearVelocity.magnitude;
-        float thrustTorque;
+        case CarDriveType.FrontWheelDrive:
+            thrustTorque = driveInput * (_currentTorque / 2f);
+            wheelFL.motorTorque = wheelFR.motorTorque = thrustTorque;
+            wheelRL.motorTorque = wheelRR.motorTorque = 0f;
+            break;
 
-        switch (_carDriveType)
+        case CarDriveType.RearWheelDrive:
+            thrustTorque = driveInput * (_currentTorque / 2f);
+            wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
+            wheelFL.motorTorque = wheelFR.motorTorque = 0f;
+            break;
+
+        case CarDriveType.AllWheelDrive:
+            thrustTorque = driveInput * (_currentTorque / 4f);
+            wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
+            break;
+    }
+
+    // --- F1 stílusú fék (nagyon erős) ---
+    float brakeStrength = _fullTorqueOverAllWheels * 8.0f; // 8x – F1 szintű fékerő
+
+    // --- Fék logika ---
+    if (accel < -0.1f)
+    {
+        // FÉK lenyomva → brutális fék, azonnal null motor
+        float brake = Mathf.Abs(accel) * brakeStrength;
+        wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = 0f;
+        wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = brake;
+    }
+    else
+    {
+        // FELENGEDVE → AZONNALI FELENGEDÉS (nincs motorfék sem)
+        wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = 0f;
+
+        // csak gáz esetén van motorTorque, különben teljesen szabadon gurul
+        if (accel > 0.1f)
         {
-            case CarDriveType.FrontWheelDrive:
-                thrustTorque = accel * (_currentTorque / 2f);
-                wheelFL.motorTorque = wheelFR.motorTorque = thrustTorque;
-                break;
-            case CarDriveType.RearWheelDrive:
-                thrustTorque = accel * (_currentTorque / 2f);
-                wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
-                break;
-            case CarDriveType.AllWheelDrive:
-                thrustTorque = accel * (_currentTorque / 4f);
-                wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
-                break;
-        }
-
-        // Motorfék
-    // --- SEBESSÉG + FORDULATSZÁM alapú motorfék számítás ---
-    float gearFactor = Mathf.InverseLerp(0, gearRatios.Length - 1, currentGear);         // alacsony fokozat -> nagyobb motorfék
-    float rpmFactor = Mathf.InverseLerp(idleRPM, redLine, RPM);                          // magasabb RPM -> nagyobb motorfék
-    float engineBrake = _fullTorqueOverAllWheels * Mathf.Lerp(0.025f, 0.2f, rpmFactor * (1f - gearFactor));
-
-    // --- Cél fékerő ---
-    float targetBrake = (Mathf.Abs(accel) < 0.1f) ? engineBrake : 0f;
-
-    // --- Simítás (ne harapjon be hirtelen) ---
-    float smoothBrake = Mathf.Lerp(
-        wheelFL.brakeTorque,
-        targetBrake,
-        Time.fixedDeltaTime * 1f
-    );
-
-        if (Mathf.Abs(accel) < 0.1f)
-        {
-            wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = 0f;
-            wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = engineBrake;
+            // motorTorque már fentebb beállítva
         }
         else
         {
-            wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = 0f;
+            wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = 0f;
         }
     }
+}
+
+
 
     public void Steer(float steerInput)
     {
