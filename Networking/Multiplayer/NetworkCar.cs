@@ -24,9 +24,11 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
     private CarController carController;
     private readonly List<CarState> stateBuffer = new List<CarState>();
 
-    // tároljuk a távoli játékos kormányállását
     private float targetSteerInput = 0f;
     private float smoothSteer = 0f;
+
+    private Vector3 targetVelocity = Vector3.zero;
+    private float targetAngularY = 0f;
 
     void Awake()
     {
@@ -47,7 +49,7 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
         else
         {
             carController.enabled = false;
-            rb.isKinematic = true;
+            rb.isKinematic = false; // fontos a kerék forgáshoz
         }
     }
 
@@ -55,7 +57,6 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
     {
         if (!photonView.IsMine)
         {
-            // Ping alapján adaptálódik az interpoláció
             float targetDelay = Mathf.Clamp(PhotonNetwork.GetPing() / 1000f * 1.2f, 0.08f, 0.15f);
             interpolationDelay = Mathf.Lerp(interpolationDelay, targetDelay, Time.deltaTime * 2f);
 
@@ -74,19 +75,38 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
         {
             ApplyInterpolatedState();
 
-            // smooth kormány animáció (a steeringInput alapján)
+            // smooth kormányzás
             smoothSteer = Mathf.Lerp(smoothSteer, targetSteerInput, Time.fixedDeltaTime * 8f);
-            carController.Steer(smoothSteer);
+            float targetAngle = smoothSteer * carController.steerAngle;
+            carController.SetSteerAngle(targetAngle);
 
-            carController.UpdateWheelVisuals();
+            // kerekek forgása a hálózati állapot alapján
+            UpdateWheelVisualsNetwork();
+
+            // velocity simítás
+            rb.linearVelocity = Vector3.Lerp(rb.linearVelocity, targetVelocity, 0.25f);
+            rb.angularVelocity = new Vector3(rb.angularVelocity.x, targetAngularY, rb.angularVelocity.z);
         }
     }
 
-    #region Interpolation
+    #region Wheel Visuals
+    private void UpdateWheelVisualsNetwork()
+    {
+        if (carController == null) return;
 
+        carController.UpdateWheel(carController.wheelFL, carController.wheelFLView);
+        carController.UpdateWheel(carController.wheelFR, carController.wheelFRView);
+        carController.UpdateWheel(carController.wheelRL, carController.wheelRLView);
+        carController.UpdateWheel(carController.wheelRR, carController.wheelRRView);
+    }
+    #endregion
+
+    #region Interpolation
     private void ApplyInterpolatedState()
     {
-        if (stateBuffer.Count == 0) return;
+        if (stateBuffer.Count == 0)
+            return;
+
         double renderTime = PhotonNetwork.Time - interpolationDelay;
 
         if (stateBuffer.Count == 1)
@@ -94,6 +114,8 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
             var s = stateBuffer[0];
             rb.position = s.position;
             rb.rotation = s.rotation;
+            targetVelocity = s.velocity;
+            targetAngularY = s.angularY;
             return;
         }
 
@@ -112,6 +134,8 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
             CarState latest = stateBuffer[stateBuffer.Count - 1];
             rb.position = Vector3.Lerp(rb.position, latest.position, positionLerp);
             rb.rotation = Quaternion.Slerp(rb.rotation, latest.rotation, rotationLerp);
+            targetVelocity = latest.velocity;
+            targetAngularY = latest.angularY;
             return;
         }
 
@@ -120,6 +144,8 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
             var s = stateBuffer[0];
             rb.position = s.position;
             rb.rotation = s.rotation;
+            targetVelocity = s.velocity;
+            targetAngularY = s.angularY;
             return;
         }
 
@@ -134,6 +160,7 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
         Quaternion interpRot = Quaternion.Slerp(older.rotation, newer.rotation, t);
 
         float dist = Vector3.Distance(rb.position, interpPos);
+
         if (dist > teleportDistance)
         {
             rb.position = interpPos;
@@ -149,38 +176,35 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
             rb.position = Vector3.Lerp(rb.position, interpPos, positionLerp);
             rb.rotation = Quaternion.Slerp(rb.rotation, interpRot, rotationLerp);
         }
-    }
 
+        targetVelocity = Vector3.Lerp(older.velocity, newer.velocity, t);
+        targetAngularY = Mathf.Lerp(older.angularY, newer.angularY, t);
+    }
     #endregion
 
     #region Photon Sync
-
     public void OnPhotonSerializeView(PhotonStream stream, PhotonMessageInfo info)
     {
         if (stream.IsWriting)
         {
-            // Saját autó adatküldés
             stream.SendNext(rb.position);
             stream.SendNext(rb.rotation);
-            stream.SendNext(carController.steeringInput); // ⬅️ Kormány vissza!
+            stream.SendNext(rb.linearVelocity);
+            stream.SendNext(rb.angularVelocity.y);
+            stream.SendNext(carController.steeringInput);
             stream.SendNext(PhotonNetwork.Time);
         }
         else
         {
-            // Távoli autó adatfogadás
             CarState s = new CarState();
             s.position = (Vector3)stream.ReceiveNext();
             s.rotation = (Quaternion)stream.ReceiveNext();
+            s.velocity = (Vector3)stream.ReceiveNext();
+            s.angularY = (float)stream.ReceiveNext();
             s.steering = (float)stream.ReceiveNext();
             s.timestamp = (double)stream.ReceiveNext();
 
-            targetSteerInput = s.steering; // ⬅️ beállítjuk a hálózati kormányállást
-
-            if (stateBuffer.Count > 0)
-            {
-                double dt = s.timestamp - stateBuffer[stateBuffer.Count - 1].timestamp;
-                if (dt < 0.0001) s.timestamp = stateBuffer[stateBuffer.Count - 1].timestamp + 0.0001;
-            }
+            targetSteerInput = s.steering;
 
             if (stateBuffer.Count == 0 || s.timestamp > stateBuffer[stateBuffer.Count - 1].timestamp)
                 stateBuffer.Add(s);
@@ -197,18 +221,17 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
                 stateBuffer.RemoveRange(0, stateBuffer.Count - maxBufferSize);
         }
     }
-
     #endregion
 
     #region Struct
-
     public struct CarState
     {
         public Vector3 position;
         public Quaternion rotation;
+        public Vector3 velocity;
+        public float angularY;
         public float steering;
         public double timestamp;
     }
-
     #endregion
 }
