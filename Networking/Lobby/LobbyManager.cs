@@ -71,8 +71,8 @@ namespace MultiplayerFramework
         {
             if (gameStatusText != null)
             {
-                gameStatusText.text = PhotonNetwork.IsMasterClient ? 
-                    "You are the host. Start when ready." : 
+                gameStatusText.text = PhotonNetwork.IsMasterClient ?
+                    "You are the host. Start when ready." :
                     "Waiting for host...";
                 gameStatusText.gameObject.SetActive(true);
             }
@@ -165,8 +165,9 @@ namespace MultiplayerFramework
             var player = PhotonNetwork.LocalPlayer.TagObject as GameObject;
             if (player == null)
             {
-                foreach (var view in FindObjectsOfType<PhotonView>())
-                    if (view.IsMine) player = view.gameObject;
+                foreach (var view in FindObjectsByType<PhotonView>(FindObjectsSortMode.None))
+                    if (view.IsMine)
+                        player = view.gameObject;
 
                 PhotonNetwork.LocalPlayer.TagObject = player;
             }

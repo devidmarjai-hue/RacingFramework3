@@ -51,7 +51,7 @@ public class AeroDownforce : MonoBehaviour
     private void ApplyAeroDownforce()
     {
         // aktuális sebesség (m/s)
-        float speed = targetRigidbody.velocity.magnitude;
+        float speed = targetRigidbody.linearVelocity.magnitude;
 
         // erő kiszámítása (lineáris vagy négyzetes)
         float scale = useQuadratic ? speed * speed : speed;
@@ -76,7 +76,7 @@ public class AeroDownforce : MonoBehaviour
 
         if (Application.isPlaying && targetRigidbody != null)
         {
-            float speed = targetRigidbody.velocity.magnitude;
+            float speed = targetRigidbody.linearVelocity.magnitude;
             float scale = useQuadratic ? speed * speed : speed;
             float downforce = coefficient * scale;
             Vector3 downDir = useLocalDown ? -transform.up : Vector3.down;

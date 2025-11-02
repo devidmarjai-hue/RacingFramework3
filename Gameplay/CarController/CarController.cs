@@ -92,7 +92,7 @@ public class CarController : MonoBehaviour
     private Rigidbody rb;
     public float RPM;
     private float wheelRPM;
-    private float clutch = 1f;
+    //private float clutch = 1f;
     private float gearVelocity = 0f;
     private float currentGearFloat = 0f;
 
@@ -104,7 +104,7 @@ public class CarController : MonoBehaviour
     private float _currentTorque;
     private float _oldRotation;
     private float _gearFactor;
-    private int _gearNum = 0;
+    //private int _gearNum = 0;
 
     // steering internal vars
     private float currentSteer;
@@ -179,7 +179,7 @@ public class CarController : MonoBehaviour
 
     void AutomaticGearbox()
     {
-        float speed = rb.velocity.magnitude * 3.6f;
+        float speed = rb.linearVelocity.magnitude * 3.6f;
 
         int desiredGear = 0;
         for (int i = 0; i < gearSpeeds.Length; i++)
@@ -195,7 +195,7 @@ public class CarController : MonoBehaviour
 
     void ApplyDrive(float accel)
     {
-        float speed = rb.velocity.magnitude;
+        float speed = rb.linearVelocity.magnitude;
         float thrustTorque;
 
         switch (_carDriveType)
@@ -243,7 +243,7 @@ public class CarController : MonoBehaviour
 
     public void Steer(float steerInput)
     {
-        float speed = rb.velocity.magnitude * 3.6f; // m/s → km/h
+        float speed = rb.linearVelocity.magnitude * 3.6f; // m/s → km/h
         float speedFactor = Mathf.Clamp01(speed / maxSpeed);
         float dynamicMaxSteer = Mathf.Lerp(maxSteerAngle, maxSteerAngle * 0.3f, speedFactor);
         float targetSteer = dynamicMaxSteer * steerInput;
@@ -309,7 +309,7 @@ public class CarController : MonoBehaviour
     {
         if (!gearText) return;
 
-        gearText.text = throttleInput < -0.1f && rb.velocity.magnitude * 3.6f < reverseEngageSpeed
+        gearText.text = throttleInput < -0.1f && rb.linearVelocity.magnitude * 3.6f < reverseEngageSpeed
             ? "Gear: R"
             : "Gear: " + (currentGear + 1);
     }
@@ -342,7 +342,7 @@ public class CarController : MonoBehaviour
 
     void AddDownForce()
     {
-        rb.AddForce(_downForce * rb.velocity.magnitude * -transform.up);
+        rb.AddForce(_downForce * rb.linearVelocity.magnitude * -transform.up);
     }
 
     void TractionControl()
