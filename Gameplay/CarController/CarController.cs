@@ -86,6 +86,29 @@ public class CarController : MonoBehaviour
     public float directionChangeBoost = 2f;
     public float autoCenterStrength = 3f;
 
+[Header("Heave / Dual Damper Settings")]
+public bool useRearHeaveDamper = true;
+[Range(0f, 100000f)] public float rearHeaveStiffness = 8000f;    // spring N/m
+[Range(0f, 20000f)] public float rearHeaveDamping = 2000f;       // damper N/(m/s)
+public Transform rearHeaveForcePoint;                            // hol addja az erőt (hátsó kasztni pont)
+public bool debugHeave = false;                                  // debug üzemmód
+
+[Header("Slip Angle Compensation (ESC)")]
+public bool useSlipAngleCompensation = true;
+public float minSpeedForSlipComp = 5f;            // m/s alatt nem avatkozik be
+public float slipDeadzoneDeg = 3f;               // kis szögeket figyelmen kívül hagy
+public float maxActiveSlipDeg = 25f;             // ennél nagyobb csúszásnál nem avatkozik (pl. drift)
+public float kp = 0.8f;                          // arányos erősége
+public float kd = 0.4f;                          // derivatív (yaw csillapítás)
+public float maxCorrectionTorque = 200f;         // Nm-ben limit
+public float speedEffect = 0.02f;                // sebességszorzó
+[Range(0f, 1f)]
+public float slipCompIntensity = 0.6f;           // 0..1 skála, mennyire avatkozzon be
+public bool debugSlipComp = false;
+
+
+
+
     [Header("UI")]
     public TextMeshProUGUI gearText;
 
@@ -164,6 +187,8 @@ public class CarController : MonoBehaviour
         AntiRoll();
         AddDownForce();
         TractionControl();
+		ApplyESC();
+		//ApplySlipAngleCompensation();
     }
 
     void UpdateRPM()
@@ -222,31 +247,159 @@ void ApplyDrive(float accel)
             break;
     }
 
-    // --- F1 stílusú fék (nagyon erős) ---
-    float brakeStrength = _fullTorqueOverAllWheels * 8.0f; // 8x – F1 szintű fékerő
+    // --- Fékbeállítások ---
+    float brakeStrength = _fullTorqueOverAllWheels * 8.0f; // erős, de nem irreális
+    float frontBias = 0.7f;
+    float rearBias = 1f - frontBias;
 
     // --- Fék logika ---
     if (accel < -0.1f)
     {
-        // FÉK lenyomva → brutális fék, azonnal null motor
         float brake = Mathf.Abs(accel) * brakeStrength;
+
+        // motor nyomatékot vedd el fékezésnél
         wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = 0f;
-        wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = brake;
+
+        // fék elosztás
+        wheelFL.brakeTorque = wheelFR.brakeTorque = brake * frontBias;
+        wheelRL.brakeTorque = wheelRR.brakeTorque = brake * rearBias;
+
+        // ABS hívása
+        ApplyABS();
     }
     else
     {
-        // FELENGEDVE → AZONNALI FELENGEDÉS (nincs motorfék sem)
-        wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = 0f;
+        // FELENGEDVE → nincs fék, de minimális motorfék
+        float engineBrake = 0.05f * _fullTorqueOverAllWheels;
 
-        // csak gáz esetén van motorTorque, különben teljesen szabadon gurul
-        if (accel > 0.1f)
+        // ha nincs gáz, egy picit lassítja a kocsit (mint GTA-ban)
+        if (accel < 0.1f)
         {
-            // motorTorque már fentebb beállítva
+            wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = engineBrake;
         }
         else
         {
-            wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = 0f;
+            wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = 0f;
         }
+    }
+}
+
+void ApplyESC()
+{
+   if (!useRearHeaveDamper || rearHeaveForcePoint == null) return;
+
+    WheelHit hit;
+    float travelL = 0f, travelR = 0f;
+    bool groundedL = wheelRL.GetGroundHit(out hit);
+    if (groundedL)
+        travelL = (wheelRL.transform.InverseTransformPoint(hit.point).y - wheelRL.radius) / wheelRL.suspensionDistance;
+
+    bool groundedR = wheelRR.GetGroundHit(out hit);
+    if (groundedR)
+        travelR = (wheelRR.transform.InverseTransformPoint(hit.point).y - wheelRR.radius) / wheelRR.suspensionDistance;
+
+    // Átlagolt travel (csak ha legalább egy kerék érintkezik)
+    float avgTravel = 0f;
+    int groundedCount = 0;
+    if (groundedL) { avgTravel += travelL; groundedCount++; }
+    if (groundedR) { avgTravel += travelR; groundedCount++; }
+    if (groundedCount == 0) return;
+
+    avgTravel /= groundedCount;
+
+    // Travel referencia (0 = szabad állás)
+    float desiredTravel = 0f;
+    float travelError = avgTravel - desiredTravel;
+
+    // Lokális függőleges sebesség
+    Vector3 localVel = transform.InverseTransformDirection(rb.GetPointVelocity(rearHeaveForcePoint.position));
+    float verticalVel = localVel.y;
+
+    // Rugó + csillapítás erő
+    float springForce = -rearHeaveStiffness * travelError;
+    float damperForce = -rearHeaveDamping * verticalVel;
+    float totalForce = springForce + damperForce;
+
+    // Limitáljuk, hogy ne dobja el a kasztnit
+    totalForce = Mathf.Clamp(totalForce, -20000f, 20000f);
+
+    // Alkalmazzuk lefelé mutató erőként
+    rb.AddForceAtPosition(-transform.up * totalForce, rearHeaveForcePoint.position);
+
+    // Debug
+    if (debugHeave)
+    {
+        Debug.DrawLine(rearHeaveForcePoint.position, rearHeaveForcePoint.position + (-transform.up * totalForce * 0.0005f), Color.cyan);
+        Debug.Log($"Heave | Travel: {avgTravel:F3} | Error: {travelError:F3} | vVel: {verticalVel:F2} | F={totalForce:F1}");
+    }
+}
+
+
+// --- ABS rendszer ---
+void ApplyABS()
+{
+    WheelHit hit;
+    float slipThreshold = 0.6f;   // ha ennél jobban csúszik, csökkentse a féket
+    float absStrength = 0.6f;     // mennyire csökkentse a fékerőt
+
+    WheelCollider[] wheels = { wheelFL, wheelFR, wheelRL, wheelRR };
+
+    foreach (var wheel in wheels)
+    {
+        if (wheel.GetGroundHit(out hit))
+        {
+            if (Mathf.Abs(hit.forwardSlip) > slipThreshold)
+            {
+                // Csökkenti a fékerőt, hogy ne blokkoljon a kerék
+                wheel.brakeTorque *= absStrength;
+            }
+        }
+    }
+}
+
+
+void ApplySlipAngleCompensation()
+{
+    if (!useSlipAngleCompensation) return;
+
+    float speed = rb.velocity.magnitude;
+    if (speed < minSpeedForSlipComp) return;
+
+    // irányok
+    Vector3 forward = transform.forward;
+    Vector3 velocityDir = rb.velocity.sqrMagnitude > 0.0001f ? rb.velocity.normalized : forward;
+
+    // slip szög (deg)
+    float slipAngle = Vector3.SignedAngle(forward, velocityDir, Vector3.up);
+
+    // kis eltérések ignorálása
+    if (Mathf.Abs(slipAngle) < slipDeadzoneDeg) return;
+
+    // drift közben ne avatkozzon (engedjük, hogy a játékos kezelje)
+    if (Mathf.Abs(slipAngle) > maxActiveSlipDeg) return;
+
+    // PD szabályozás (stabilizáló)
+    float pTerm = kp * slipAngle;
+    float yawRateDeg = rb.angularVelocity.y * Mathf.Rad2Deg;
+    float dTerm = kd * yawRateDeg;
+
+    // sebességskálázás
+    float speedFactor = 1f + speed * speedEffect;
+
+    // kontroll jel - a cél: csillapítani, nem "ellentekerni"
+    float control = -(pTerm + dTerm) * slipCompIntensity * speedFactor;
+
+    // torque korlátozás
+    float torque = Mathf.Clamp(control, -maxCorrectionTorque, maxCorrectionTorque);
+
+    // alkalmazás relatív tengely mentén
+    rb.AddRelativeTorque(Vector3.up * torque, ForceMode.Force);
+
+    if (debugSlipComp)
+    {
+        Debug.DrawRay(transform.position + Vector3.up * 0.5f, transform.forward * 2f, Color.green);
+        Debug.DrawRay(transform.position + Vector3.up * 0.5f, velocityDir * 2f, Color.yellow);
+        Debug.Log($"SlipComp | slip:{slipAngle:F2}°  p:{pTerm:F2}  d:{dTerm:F2}  speed:{speed:F2}  torque:{torque:F1}");
     }
 }
 
