@@ -1,121 +1,143 @@
 using Photon.Pun;
-using UnityEngine;
 using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.InputSystem; // <-- új Input System
+using TMPro;
 
-[RequireComponent(typeof(Rigidbody))]
 [RequireComponent(typeof(CarController))]
-public class NetworkCar : MonoBehaviourPun, IPunObservable
+public class NetworkCar : MonoBehaviourPunCallbacks, IPunObservable
 {
-    [Header("Interpolation")]
-    public float interpolationDelay = 0.1f;
+    TextMeshPro NickNameText;
+    public CarController Car { get; private set; }
+    public PhotonView PhotonView { get; private set; }
+    public bool IsMine => PhotonView != null && PhotonView.IsMine;
 
-    [Header("Smoothing")]
-    public float positionLerp = 0.25f;
-    public float rotationLerp = 0.3f;
-
-    [Header("Distances")]
-    public float fastSyncDistance = 3f;
-    public float teleportDistance = 10f;
-
-    [Header("Buffer")]
-    public int maxBufferSize = 12;
-
-    private Rigidbody rb;
-    private CarController carController;
     private readonly List<CarState> stateBuffer = new List<CarState>();
+    private float targetSteerInput, smoothSteer;
+    private float targetAccelInput, smoothAccel;
+    private float targetBrakeInput, smoothBrake;
 
-    private float targetSteerInput = 0f;
-    private float smoothSteer = 0f;
+    private Rigidbody RB => Car.GetComponent<Rigidbody>();
 
-    private Vector3 targetVelocity = Vector3.zero;
-    private float targetAngularY = 0f;
-
-    void Awake()
-    {
-        rb = GetComponent<Rigidbody>();
-        carController = GetComponent<CarController>();
-    }
+    // Interpolation + smoothing settings
+    private const float INTERPOLATION_DELAY = 0.12f;
+    private const float POSITION_LERP = 0.25f;
+    private const float ROTATION_LERP = 0.3f;
+    private const float TELEPORT_DISTANCE = 10f;
+    private const float FAST_SYNC_DISTANCE = 3f;
+    private const int MAX_BUFFER_SIZE = 12;
 
     void Start()
     {
-        if (photonView.IsMine)
-        {
-            carController.enabled = true;
-            rb.isKinematic = false;
+        PhotonView = GetComponent<PhotonView>();
+        Car = GetComponent<CarController>();
 
-            PhotonNetwork.SendRate = 20;
-            PhotonNetwork.SerializationRate = 10;
-        }
-        else
+        if (!PhotonNetwork.InRoom)
         {
-            carController.enabled = false;
-            rb.isKinematic = false; // fontos a kerék forgáshoz
+            Destroy(this);
+            return;
         }
-    }
 
-    void Update()
-    {
-        if (!photonView.IsMine)
+        if (IsMine)
         {
-            float targetDelay = Mathf.Clamp(PhotonNetwork.GetPing() / 1000f * 1.2f, 0.08f, 0.15f);
-            interpolationDelay = Mathf.Lerp(interpolationDelay, targetDelay, Time.deltaTime * 2f);
-
-            if (stateBuffer.Count > maxBufferSize)
-                stateBuffer.RemoveAt(0);
+            gameObject.AddComponent<AudioListener>();
         }
+
+
     }
 
     void FixedUpdate()
     {
-        if (photonView.IsMine)
+        if (Car == null) return;
+
+        if (IsMine)
         {
-            carController.UpdateWheelVisuals();
+            Car.UpdateWheelVisuals();
         }
         else
         {
             ApplyInterpolatedState();
 
-            // smooth kormányzás
             smoothSteer = Mathf.Lerp(smoothSteer, targetSteerInput, Time.fixedDeltaTime * 8f);
-            float targetAngle = smoothSteer * carController.steerAngle;
-            carController.SetSteerAngle(targetAngle);
+            smoothAccel = Mathf.Lerp(smoothAccel, targetAccelInput, Time.fixedDeltaTime * 8f);
+            smoothBrake = Mathf.Lerp(smoothBrake, targetBrakeInput, Time.fixedDeltaTime * 8f);
 
-            // kerekek forgása a hálózati állapot alapján
-            UpdateWheelVisualsNetwork();
-
-            // velocity simítás
-            rb.linearVelocity = Vector3.Lerp(rb.linearVelocity, targetVelocity, 0.25f);
-            rb.angularVelocity = new Vector3(rb.angularVelocity.x, targetAngularY, rb.angularVelocity.z);
+            Car.Steer(smoothSteer);
+            Car.ApplyDrive(smoothAccel);
+            Car.UpdateWheelVisuals();
         }
     }
 
-    #region Wheel Visuals
-    private void UpdateWheelVisualsNetwork()
+    void Update()
     {
-        if (carController == null) return;
+        // rotate nickname to face camera if visible
+        if (NickNameText != null && NickNameText.gameObject.activeInHierarchy)
+        {
+            if (Camera.main != null)
+                NickNameText.transform.rotation = Camera.main.transform.rotation;
+        }
 
-        carController.UpdateWheel(carController.wheelFL, carController.wheelFLView);
-        carController.UpdateWheel(carController.wheelFR, carController.wheelFRView);
-        carController.UpdateWheel(carController.wheelRL, carController.wheelRLView);
-        carController.UpdateWheel(carController.wheelRR, carController.wheelRRView);
+        // Új Input System használata: N billentyű
+        var keyboard = Keyboard.current;
+        if (keyboard != null && keyboard.nKey.wasPressedThisFrame && NickNameText != null)
+        {
+            NickNameText.gameObject.SetActive(!NickNameText.gameObject.activeSelf);
+        }
     }
-    #endregion
 
-    #region Interpolation
+    // --- Photon sync ---
+    public void OnPhotonSerializeView(PhotonStream stream, PhotonMessageInfo info)
+    {
+        if (Car == null) return;
+
+        if (stream.IsWriting)
+        {
+            stream.SendNext(RB.position);
+            stream.SendNext(RB.rotation);
+            stream.SendNext(RB.velocity);
+            stream.SendNext(RB.angularVelocity.y);
+            stream.SendNext(Car.steeringInput);
+            stream.SendNext(Car.throttleInput);
+            stream.SendNext(Car.throttleInput < -0.1f ? 1f : 0f); // brake state
+            stream.SendNext(PhotonNetwork.Time);
+        }
+        else
+        {
+            CarState s = new CarState();
+            s.position = (Vector3)stream.ReceiveNext();
+            s.rotation = (Quaternion)stream.ReceiveNext();
+            s.velocity = (Vector3)stream.ReceiveNext();
+            s.angularVelocityY = (float)stream.ReceiveNext();
+            s.steer = (float)stream.ReceiveNext();
+            s.accel = (float)stream.ReceiveNext();
+            s.brake = (float)stream.ReceiveNext();
+            s.timestamp = (double)stream.ReceiveNext();
+
+            float lag = Mathf.Abs((float)(PhotonNetwork.Time - info.SentServerTime));
+            s.position += s.velocity * lag;
+            s.rotation *= Quaternion.AngleAxis(s.angularVelocityY * lag, Vector3.up);
+
+            targetSteerInput = s.steer;
+            targetAccelInput = s.accel;
+            targetBrakeInput = s.brake;
+
+            if (stateBuffer.Count == 0 || s.timestamp > stateBuffer[stateBuffer.Count - 1].timestamp)
+                stateBuffer.Add(s);
+
+            if (stateBuffer.Count > MAX_BUFFER_SIZE)
+                stateBuffer.RemoveRange(0, stateBuffer.Count - MAX_BUFFER_SIZE);
+        }
+    }
+
+    // --- Interpolation ---
     private void ApplyInterpolatedState()
     {
-        if (stateBuffer.Count == 0)
-            return;
-
-        double renderTime = PhotonNetwork.Time - interpolationDelay;
+        if (stateBuffer.Count == 0) return;
+        double renderTime = PhotonNetwork.Time - INTERPOLATION_DELAY;
 
         if (stateBuffer.Count == 1)
         {
-            var s = stateBuffer[0];
-            rb.position = s.position;
-            rb.rotation = s.rotation;
-            targetVelocity = s.velocity;
-            targetAngularY = s.angularY;
+            ApplyState(stateBuffer[0]);
             return;
         }
 
@@ -131,21 +153,13 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
 
         if (newerIndex == -1)
         {
-            CarState latest = stateBuffer[stateBuffer.Count - 1];
-            rb.position = Vector3.Lerp(rb.position, latest.position, positionLerp);
-            rb.rotation = Quaternion.Slerp(rb.rotation, latest.rotation, rotationLerp);
-            targetVelocity = latest.velocity;
-            targetAngularY = latest.angularY;
+            ApplyLerpedState(stateBuffer[stateBuffer.Count - 1]);
             return;
         }
 
         if (newerIndex == 0)
         {
-            var s = stateBuffer[0];
-            rb.position = s.position;
-            rb.rotation = s.rotation;
-            targetVelocity = s.velocity;
-            targetAngularY = s.angularY;
+            ApplyState(stateBuffer[0]);
             return;
         }
 
@@ -158,80 +172,57 @@ public class NetworkCar : MonoBehaviourPun, IPunObservable
 
         Vector3 interpPos = Vector3.Lerp(older.position, newer.position, t);
         Quaternion interpRot = Quaternion.Slerp(older.rotation, newer.rotation, t);
+        Vector3 interpVel = Vector3.Lerp(older.velocity, newer.velocity, t);
+        float interpAngVelY = Mathf.Lerp(older.angularVelocityY, newer.angularVelocityY, t);
 
-        float dist = Vector3.Distance(rb.position, interpPos);
+        float dist = Vector3.Distance(RB.position, interpPos);
 
-        if (dist > teleportDistance)
+        if (dist > TELEPORT_DISTANCE)
         {
-            rb.position = interpPos;
-            rb.rotation = interpRot;
+            RB.position = interpPos;
+            RB.rotation = interpRot;
         }
-        else if (dist > fastSyncDistance)
+        else if (dist > FAST_SYNC_DISTANCE)
         {
-            rb.position = Vector3.Lerp(rb.position, interpPos, positionLerp * 2f);
-            rb.rotation = Quaternion.Slerp(rb.rotation, interpRot, rotationLerp * 2f);
+            RB.position = Vector3.Lerp(RB.position, interpPos, POSITION_LERP * 2f);
+            RB.rotation = Quaternion.Slerp(RB.rotation, interpRot, ROTATION_LERP * 2f);
         }
         else
         {
-            rb.position = Vector3.Lerp(rb.position, interpPos, positionLerp);
-            rb.rotation = Quaternion.Slerp(rb.rotation, interpRot, rotationLerp);
+            RB.position = Vector3.Lerp(RB.position, interpPos, POSITION_LERP);
+            RB.rotation = Quaternion.Slerp(RB.rotation, interpRot, ROTATION_LERP);
         }
 
-        targetVelocity = Vector3.Lerp(older.velocity, newer.velocity, t);
-        targetAngularY = Mathf.Lerp(older.angularY, newer.angularY, t);
+        RB.velocity = Vector3.Lerp(RB.velocity, interpVel, 0.25f);
+        RB.angularVelocity = new Vector3(RB.angularVelocity.x, interpAngVelY, RB.angularVelocity.z);
     }
-    #endregion
 
-    #region Photon Sync
-    public void OnPhotonSerializeView(PhotonStream stream, PhotonMessageInfo info)
+    private void ApplyState(CarState s)
     {
-        if (stream.IsWriting)
-        {
-            stream.SendNext(rb.position);
-            stream.SendNext(rb.rotation);
-            stream.SendNext(rb.linearVelocity);
-            stream.SendNext(rb.angularVelocity.y);
-            stream.SendNext(carController.steeringInput);
-            stream.SendNext(PhotonNetwork.Time);
-        }
-        else
-        {
-            CarState s = new CarState();
-            s.position = (Vector3)stream.ReceiveNext();
-            s.rotation = (Quaternion)stream.ReceiveNext();
-            s.velocity = (Vector3)stream.ReceiveNext();
-            s.angularY = (float)stream.ReceiveNext();
-            s.steering = (float)stream.ReceiveNext();
-            s.timestamp = (double)stream.ReceiveNext();
-
-            targetSteerInput = s.steering;
-
-            if (stateBuffer.Count == 0 || s.timestamp > stateBuffer[stateBuffer.Count - 1].timestamp)
-                stateBuffer.Add(s);
-            else
-            {
-                int insertIndex = stateBuffer.FindIndex(x => x.timestamp > s.timestamp);
-                if (insertIndex == -1)
-                    stateBuffer.Add(s);
-                else
-                    stateBuffer.Insert(insertIndex, s);
-            }
-
-            if (stateBuffer.Count > maxBufferSize)
-                stateBuffer.RemoveRange(0, stateBuffer.Count - maxBufferSize);
-        }
+        RB.position = s.position;
+        RB.rotation = s.rotation;
+        RB.velocity = s.velocity;
+        RB.angularVelocity = new Vector3(RB.angularVelocity.x, s.angularVelocityY, RB.angularVelocity.z);
     }
-    #endregion
 
-    #region Struct
+    private void ApplyLerpedState(CarState s)
+    {
+        RB.position = Vector3.Lerp(RB.position, s.position, POSITION_LERP);
+        RB.rotation = Quaternion.Slerp(RB.rotation, s.rotation, ROTATION_LERP);
+        RB.velocity = Vector3.Lerp(RB.velocity, s.velocity, 0.25f);
+        RB.angularVelocity = new Vector3(RB.angularVelocity.x, s.angularVelocityY, RB.angularVelocity.z);
+    }
+
+    // --- State struct ---
     public struct CarState
     {
         public Vector3 position;
         public Quaternion rotation;
         public Vector3 velocity;
-        public float angularY;
-        public float steering;
+        public float angularVelocityY;
+        public float steer;
+        public float accel;
+        public float brake;
         public double timestamp;
     }
-    #endregion
 }

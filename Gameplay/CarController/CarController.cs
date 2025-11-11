@@ -218,42 +218,86 @@ public bool debugSlipComp = false;
         currentGear = Mathf.Clamp(Mathf.RoundToInt(currentGearFloat), 0, gearSpeeds.Length - 1);
     }
 
-void ApplyDrive(float accel)
+public void ApplyDrive(float accel)
 {
     float speed = rb.linearVelocity.magnitude;
-    float thrustTorque;
+    float speedKmh = speed * 3.6f;
+    float thrustTorque = 0f;
 
-    // --- Csak pozitív gáz ad hajtást ---
-    float driveInput = Mathf.Max(accel, 0f);
-
-    // --- Hajtás ---
-    switch (_carDriveType)
-    {
-        case CarDriveType.FrontWheelDrive:
-            thrustTorque = driveInput * (_currentTorque / 2f);
-            wheelFL.motorTorque = wheelFR.motorTorque = thrustTorque;
-            wheelRL.motorTorque = wheelRR.motorTorque = 0f;
-            break;
-
-        case CarDriveType.RearWheelDrive:
-            thrustTorque = driveInput * (_currentTorque / 2f);
-            wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
-            wheelFL.motorTorque = wheelFR.motorTorque = 0f;
-            break;
-
-        case CarDriveType.AllWheelDrive:
-            thrustTorque = driveInput * (_currentTorque / 4f);
-            wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
-            break;
-    }
-
-    // --- Fékbeállítások ---
-    float brakeStrength = _fullTorqueOverAllWheels * 8.0f; // erős, de nem irreális
+    // --- Paraméterek ---
+    float brakeStrength = _fullTorqueOverAllWheels * 8.0f; 
     float frontBias = 0.7f;
     float rearBias = 1f - frontBias;
+    float engineBrake = 0.05f * _fullTorqueOverAllWheels;
+    float maxReverseSpeedKmh = 40f; // hátrameneti sebességkorlát
 
-    // --- Fék logika ---
-    if (accel < -0.1f)
+    // --- Fékek alaphelyzetbe ---
+    wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = 0f;
+
+    // --- Hátramenet mód detektálás ---
+    bool isReversing = Vector3.Dot(rb.linearVelocity, transform.forward) < -0.5f; // ha hátrafelé mozgunk
+    bool canReverse = accel < -0.1f && (speedKmh < 2f || isReversing);
+
+    // --- HAJTÁS LOGIKA ---
+    if (accel > 0.1f)
+    {
+        // Előremenet
+        float driveInput = accel;
+        switch (_carDriveType)
+        {
+            case CarDriveType.FrontWheelDrive:
+                thrustTorque = driveInput * (_currentTorque / 2f);
+                wheelFL.motorTorque = wheelFR.motorTorque = thrustTorque;
+                wheelRL.motorTorque = wheelRR.motorTorque = 0f;
+                break;
+
+            case CarDriveType.RearWheelDrive:
+                thrustTorque = driveInput * (_currentTorque / 2f);
+                wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
+                wheelFL.motorTorque = wheelFR.motorTorque = 0f;
+                break;
+
+            case CarDriveType.AllWheelDrive:
+                thrustTorque = driveInput * (_currentTorque / 4f);
+                wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = thrustTorque;
+                break;
+        }
+    }
+    else if (canReverse)
+    {
+        // --- HÁTRAMENET HAJTÁS ---
+        if (speedKmh < maxReverseSpeedKmh)
+        {
+            float reverseInput = Mathf.Abs(accel);
+            switch (_carDriveType)
+            {
+                case CarDriveType.FrontWheelDrive:
+                    thrustTorque = reverseInput * (_currentTorque / 2f);
+                    wheelFL.motorTorque = wheelFR.motorTorque = -thrustTorque;
+                    wheelRL.motorTorque = wheelRR.motorTorque = 0f;
+                    break;
+
+                case CarDriveType.RearWheelDrive:
+                    thrustTorque = reverseInput * (_currentTorque / 2f);
+                    wheelRL.motorTorque = wheelRR.motorTorque = -thrustTorque;
+                    wheelFL.motorTorque = wheelFR.motorTorque = 0f;
+                    break;
+
+                case CarDriveType.AllWheelDrive:
+                    thrustTorque = reverseInput * (_currentTorque / 4f);
+                    wheelFL.motorTorque = wheelFR.motorTorque = wheelRL.motorTorque = wheelRR.motorTorque = -thrustTorque;
+                    break;
+            }
+        }
+        else
+        {
+            // ha túl gyors hátrafelé, motorfék
+            wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = engineBrake * 3f;
+        }
+    }
+
+    // --- FÉKEZÉS ---
+    if (accel < -0.1f && !canReverse)
     {
         float brake = Mathf.Abs(accel) * brakeStrength;
 
@@ -264,23 +308,12 @@ void ApplyDrive(float accel)
         wheelFL.brakeTorque = wheelFR.brakeTorque = brake * frontBias;
         wheelRL.brakeTorque = wheelRR.brakeTorque = brake * rearBias;
 
-        // ABS hívása
         ApplyABS();
     }
-    else
+    else if (Mathf.Abs(accel) < 0.1f)
     {
-        // FELENGEDVE → nincs fék, de minimális motorfék
-        float engineBrake = 0.05f * _fullTorqueOverAllWheels;
-
-        // ha nincs gáz, egy picit lassítja a kocsit (mint GTA-ban)
-        if (accel < 0.1f)
-        {
-            wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = engineBrake;
-        }
-        else
-        {
-            wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = 0f;
-        }
+        // motorfék (felengedett gáz)
+        wheelFL.brakeTorque = wheelFR.brakeTorque = wheelRL.brakeTorque = wheelRR.brakeTorque = engineBrake;
     }
 }
 
